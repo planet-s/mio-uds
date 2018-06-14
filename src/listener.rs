@@ -2,14 +2,16 @@ use std::io;
 use std::os::unix::net;
 use std::os::unix::prelude::*;
 use std::path::Path;
+use std::os::unix::io::RawFd;
 
-use libc;
 use mio::event::Evented;
 use mio::unix::EventedFd;
 use mio::{Poll, PollOpt, Ready, Token};
 
 use UnixStream;
-use cvt;
+#[cfg(not(target_os = "redox"))]
+use {cvt, libc};
+#[cfg(not(target_os = "redox"))]
 use socket::{sockaddr_un, Socket};
 
 /// A structure representing a Unix domain socket server.
@@ -28,6 +30,7 @@ impl UnixListener {
         UnixListener::_bind(path.as_ref())
     }
 
+    #[cfg(not(target_os = "redox"))]
     fn _bind(path: &Path) -> io::Result<UnixListener> {
         unsafe {
             let (addr, len) = try!(sockaddr_un(path));
@@ -39,6 +42,10 @@ impl UnixListener {
 
             Ok(UnixListener::from_raw_fd(fd.into_fd()))
         }
+    }
+    #[cfg(target_os = "redox")]
+    fn _bind(path: &Path) -> io::Result<UnixListener> {
+        Self::from_listener(net::UnixListener::bind(path)?)
     }
 
     /// Consumes a standard library `UnixListener` and returns a wrapped
@@ -123,19 +130,19 @@ impl Evented for UnixListener {
 }
 
 impl AsRawFd for UnixListener {
-    fn as_raw_fd(&self) -> i32 {
+    fn as_raw_fd(&self) -> RawFd {
         self.inner.as_raw_fd()
     }
 }
 
 impl IntoRawFd for UnixListener {
-    fn into_raw_fd(self) -> i32 {
+    fn into_raw_fd(self) -> RawFd {
         self.inner.into_raw_fd()
     }
 }
 
 impl FromRawFd for UnixListener {
-    unsafe fn from_raw_fd(fd: i32) -> UnixListener {
+    unsafe fn from_raw_fd(fd: RawFd) -> UnixListener {
         UnixListener {
             inner: net::UnixListener::from_raw_fd(fd),
         }

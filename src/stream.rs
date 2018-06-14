@@ -1,3 +1,4 @@
+#[cfg(not(target_os = "redox"))]
 use std::cmp;
 use std::io::prelude::*;
 use std::io;
@@ -5,15 +6,18 @@ use std::os::unix::net;
 use std::os::unix::prelude::*;
 use std::path::Path;
 use std::net::Shutdown;
+use std::os::unix::io::RawFd;
 
 use iovec::IoVec;
+#[cfg(not(target_os = "redox"))]
 use iovec::unix as iovec;
-use libc;
 use mio::event::Evented;
 use mio::unix::EventedFd;
 use mio::{Poll, Token, Ready, PollOpt};
 
-use cvt;
+#[cfg(not(target_os = "redox"))]
+use {cvt, libc};
+#[cfg(not(target_os = "redox"))]
 use socket::{sockaddr_un, Socket};
 
 /// A Unix stream socket.
@@ -47,6 +51,7 @@ impl UnixStream {
         UnixStream::_connect(p.as_ref())
     }
 
+    #[cfg(not(target_os = "redox"))]
     fn _connect(path: &Path) -> io::Result<UnixStream> {
         unsafe {
             let (addr, len) = try!(sockaddr_un(path));
@@ -60,6 +65,10 @@ impl UnixStream {
 
             Ok(UnixStream::from_raw_fd(socket.into_fd()))
         }
+    }
+    #[cfg(target_os = "redox")]
+    fn _connect(path: &Path) -> io::Result<UnixStream> {
+        Self::from_stream(net::UnixStream::connect(path)?)
     }
 
     /// Consumes a standard library `UnixStream` and returns a wrapped
@@ -75,11 +84,20 @@ impl UnixStream {
     /// Creates an unnamed pair of connected sockets.
     ///
     /// Returns two `UnixStream`s which are connected to each other.
+    #[cfg(not(target_os = "redox"))]
     pub fn pair() -> io::Result<(UnixStream, UnixStream)> {
         Socket::pair(libc::SOCK_STREAM).map(|(a, b)| unsafe {
             (UnixStream::from_raw_fd(a.into_fd()),
              UnixStream::from_raw_fd(b.into_fd()))
         })
+    }
+    /// Creates an unnamed pair of connected sockets.
+    ///
+    /// Returns two `UnixStream`s which are connected to each other.
+    #[cfg(target_os = "redox")]
+    pub fn pair() -> io::Result<(UnixStream, UnixStream)> {
+        let (one, two) = net::UnixStream::pair()?;
+        Ok((Self::from_stream(one)?, Self::from_stream(two)?))
     }
 
     /// Creates a new independently owned handle to the underlying socket.
@@ -130,6 +148,7 @@ impl UnixStream {
     /// The number of bytes read is returned, if successful, or an error is
     /// returned otherwise. If no bytes are available to be read yet then
     /// a "would block" error is returned. This operation does not block.
+    #[cfg(not(target_os = "redox"))]
     pub fn read_bufs(&self, bufs: &mut [&mut IoVec]) -> io::Result<usize> {
         unsafe {
             let slice = iovec::as_os_slice_mut(bufs);
@@ -144,6 +163,30 @@ impl UnixStream {
             }
         }
     }
+    /// Read in a list of buffers all at once.
+    ///
+    /// This operation will attempt to read bytes from this socket and place
+    /// them into the list of buffers provided. Note that each buffer is an
+    /// `IoVec` which can be created from a byte slice.
+    ///
+    /// The buffers provided will be filled in sequentially. A buffer will be
+    /// entirely filled up before the next is written to.
+    ///
+    /// The number of bytes read is returned, if successful, or an error is
+    /// returned otherwise. If no bytes are available to be read yet then
+    /// a "would block" error is returned. This operation does not block.
+    #[cfg(target_os = "redox")]
+    pub fn read_bufs(&self, bufs: &mut [&mut IoVec]) -> io::Result<usize> {
+        let mut total = 0;
+        for buf in bufs {
+            let n = (&self.inner).read(buf)?;
+            total += n;
+            if n < buf.len() {
+                return Ok(total);
+            }
+        }
+        Ok(total)
+    }
 
     /// Write a list of buffers all at once.
     ///
@@ -157,6 +200,7 @@ impl UnixStream {
     /// The number of bytes written is returned, if successful, or an error is
     /// returned otherwise. If the socket is not currently writable then a
     /// "would block" error is returned. This operation does not block.
+    #[cfg(not(target_os = "redox"))]
     pub fn write_bufs(&self, bufs: &[&IoVec]) -> io::Result<usize> {
         unsafe {
             let slice = iovec::as_os_slice(bufs);
@@ -170,6 +214,30 @@ impl UnixStream {
                 Ok(rc as usize)
             }
         }
+    }
+    /// Write a list of buffers all at once.
+    ///
+    /// This operation will attempt to write a list of byte buffers to this
+    /// socket. Note that each buffer is an `IoVec` which can be created from a
+    /// byte slice.
+    ///
+    /// The buffers provided will be written sequentially. A buffer will be
+    /// entirely written before the next is written.
+    ///
+    /// The number of bytes written is returned, if successful, or an error is
+    /// returned otherwise. If the socket is not currently writable then a
+    /// "would block" error is returned. This operation does not block.
+    #[cfg(target_os = "redox")]
+    pub fn write_bufs(&self, bufs: &[&IoVec]) -> io::Result<usize> {
+        let mut total = 0;
+        for buf in bufs {
+            let n = (&self.inner).write(buf)?;
+            total += n;
+            if n < buf.len() {
+                return Ok(total);
+            }
+        }
+        Ok(total)
     }
 }
 
@@ -228,19 +296,19 @@ impl<'a> Write for &'a UnixStream {
 }
 
 impl AsRawFd for UnixStream {
-    fn as_raw_fd(&self) -> i32 {
+    fn as_raw_fd(&self) -> RawFd {
         self.inner.as_raw_fd()
     }
 }
 
 impl IntoRawFd for UnixStream {
-    fn into_raw_fd(self) -> i32 {
+    fn into_raw_fd(self) -> RawFd {
         self.inner.into_raw_fd()
     }
 }
 
 impl FromRawFd for UnixStream {
-    unsafe fn from_raw_fd(fd: i32) -> UnixStream {
+    unsafe fn from_raw_fd(fd: RawFd) -> UnixStream {
         UnixStream { inner: net::UnixStream::from_raw_fd(fd) }
     }
 }
